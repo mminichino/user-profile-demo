@@ -32,18 +32,6 @@ class dbConnection(object):
         self.collection_name = collection_name
 
 
-class serviceDefinition(object):
-
-    def __init__(self, srv_host, srv_port, cb_host, cb_user, cb_pass, bucket, ssl=False):
-        self.server_hostname = srv_host
-        self.server_port = srv_port
-        self.couchbase_host = cb_host
-        self.couchbase_user = cb_user
-        self.couchbase_password = cb_pass
-        self.couchbase_bucket = bucket
-        self.use_ssl = ssl
-
-
 class couchbaseDriver(object):
 
     def __init__(self, hostname, username, password, ssl=False, internal=False):
