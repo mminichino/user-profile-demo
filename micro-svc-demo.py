@@ -9,13 +9,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
 import daemon
 import signal
-import logging
 import json
 from functools import partial
-from couchbase_core._libcouchbase import LOCKMODE_EXC, LOCKMODE_NONE, LOCKMODE_WAIT
-from couchbase.cluster import Cluster, ClusterOptions, QueryOptions, ClusterTimeoutOptions
+from couchbase_core._libcouchbase import LOCKMODE_NONE
+from couchbase.cluster import Cluster, QueryOptions, ClusterTimeoutOptions
 from couchbase.auth import PasswordAuthenticator
-from datetime import datetime, timedelta
+from couchbase.exceptions import DocumentNotFoundException
+from datetime import timedelta
 
 PORT_NUMBER = 8080
 LOG_FILE = '/tmp/service.out'
@@ -31,6 +31,7 @@ class dbConnection(object):
         self.scope_name = scope_name
         self.collection_name = collection_name
 
+
 class serviceDefinition(object):
 
     def __init__(self, srv_host, srv_port, cb_host, cb_user, cb_pass, bucket, ssl=False):
@@ -42,10 +43,10 @@ class serviceDefinition(object):
         self.couchbase_bucket = bucket
         self.use_ssl = ssl
 
+
 class couchbaseDriver(object):
 
     def __init__(self, hostname, username, password, ssl=False, internal=False):
-        self.logger = logging.getLogger(self.__class__.__name__)
         self.hostname = hostname
         self.auth = PasswordAuthenticator(username, password)
         self.timeouts = ClusterTimeoutOptions(query_timeout=timedelta(seconds=30),
@@ -84,19 +85,22 @@ class couchbaseDriver(object):
                 bucket_name,
                 collection_name,
                 e))
-            return False
+            raise
 
     def get(self, key):
         if self.dbObject:
             try:
-                result = self.dbObject.collection_object.get(key)
+                key_name = self.formatKey(key)
+                result = self.dbObject.collection_object.get(key_name)
                 return result.content_as[dict]
+            except DocumentNotFoundException:
+                return None
             except Exception as e:
-                self.logger.info("Can not get key {} from collection {}: {}".format(
+                print("Can not get key {} from collection {}: {}".format(
                     key,
                     self.dbObject.collection_name,
                     e))
-                return None
+                raise
 
     def query(self, field, key, value):
         if self.dbObject:
@@ -109,15 +113,19 @@ class couchbaseDriver(object):
                     contents.append(item)
                 return contents
             except Exception as e:
-                self.logger.info("Can not get key {} from collection {}: {}".format(
+                print("Can not get key {} from collection {}: {}".format(
                     key,
                     self.dbObject.collection_name,
                     e))
-                return None
+                raise
+
+    def formatKey(self, key):
+        return self.dbObject.collection_name + ':' + key
 
     @property
     def cb_string(self):
         return self.cbcon + self.hostname + self.opts
+
 
 class restServer(BaseHTTPRequestHandler):
 
@@ -137,53 +145,61 @@ class restServer(BaseHTTPRequestHandler):
     def server_error(self):
         self.send_response(500)
 
+    def v1_get_records(self, key, value):
+        records = []
+        result = self.db.query('record_id', key, value)
+        if len(result) > 0:
+            for item in result:
+                record_data = self.db.get(item['record_id'])
+                records.append(record_data)
+        return records
+
+    def v1_get_by_id(self, id):
+        records = []
+        result = self.db.get(id)
+        if result:
+            records.append(result)
+        return records
+
+    def v1_responder(self, records):
+        if len(records) > 0:
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(bytes(json.dumps(records), "utf-8"))
+        else:
+            self.not_found()
+
     def do_GET(self):
         try:
             request_root = self.path.split('/')[1]
             request_version = self.path.split('/')[2]
             request_method = self.path.split('/')[3]
+            request_parameter = self.path.split('/')[4]
         except IndexError:
             self.bad_request()
             return
 
-        if request_root != 'api':
+        if request_root != 'api' or request_version != 'v1':
             self.forbidden()
             return
 
-        if request_version != 'v1':
-            self.forbidden()
+        try:
+            if request_method == 'nickname':
+                records = self.v1_get_records('nickname', request_parameter)
+            elif request_method == 'username':
+                records = self.v1_get_records('user_id', request_parameter)
+            elif request_method == 'id':
+                records = self.v1_get_by_id(request_parameter)
+            else:
+                self.forbidden()
+                return
+            self.v1_responder(records)
+        except Exception as e:
+            print("Server error: {}".format(e))
+            self.server_error()
             return
 
-        if request_method == 'nickname':
-            try:
-                request_nickname = self.path.split('/')[4]
-            except IndexError:
-                self.bad_request()
-                return
-            try:
-                result = self.db.query('record_id', 'nickname', request_nickname)
-                if not result:
-                    self.server_error()
-                    return
-                if len(result) > 0:
-                    records = []
-                    for item in result:
-                        print(item['record_id'])
-                        record_json = self.db.get(item['record_id'])
-                        records.append(record_json)
-                    self.send_response(200)
-                    self.send_header("Content-type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(bytes(json.dumps(records), "utf-8"))
-                    print(json.dumps(records))
-                else:
-                    self.bad_request()
-                    return
-            except Exception as e:
-                self.server_error()
-                return
-        else:
-            self.forbidden()
 
 class microService(object):
 
@@ -192,13 +208,13 @@ class microService(object):
         self.port = port
         restHandler = partial(restServer, db)
         self.server = HTTPServer((self.hostname, self.port), restHandler)
-        self.logger = logging.getLogger(self.__class__.__name__)
 
     def start(self):
         self.server.serve_forever()
 
     def stop(self):
         self.server.server_close()
+
 
 def parse_args():
     parser = argparse.ArgumentParser(add_help=False)
@@ -217,7 +233,6 @@ def parse_args():
     return args
 
 def main():
-    logger = logging.getLogger()
     args = parse_args()
 
     couchbase_server = couchbaseDriver(args.cluster, args.user, args.password, ssl=args.tls)
@@ -229,15 +244,6 @@ def main():
 
     server = microService(args.host, args.port, couchbase_server)
     logfile = open(args.log, 'w')
-
-    if args.debug == 0:
-        logger.setLevel(logging.DEBUG)
-    elif args.debug == 1:
-        logger.setLevel(logging.INFO)
-    elif args.debug == 2:
-        logger.setLevel(logging.ERROR)
-    else:
-        logger.setLevel(logging.CRITICAL)
 
     def signalHandler(signum, frame):
         server.stop()
@@ -256,8 +262,8 @@ def main():
         signal.signal(signal.SIGINT, signalHandler)
         server.start()
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     try:
         main()
     except SystemExit as e:
