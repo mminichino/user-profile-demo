@@ -1,0 +1,2 @@
+python-daemon>=2.3.0
+couchbase>=3.2.5
