@@ -22,14 +22,11 @@ LOG_FILE = '/tmp/service.out'
 
 class dbConnection(object):
 
-    def __init__(self, cluster, bucket, scope, collection, bucket_name, scope_name, collection_name):
-        self.cluster_object = cluster
-        self.bucket_object = bucket
-        self.scope_object = scope
-        self.collection_object = collection
-        self.bucket_name = bucket_name
-        self.scope_name = scope_name
-        self.collection_name = collection_name
+    def __init__(self, cluster, bucket, scope, collections):
+        self.cluster = cluster
+        self.bucket = bucket
+        self.scope = scope
+        self.collections = collections
 
 
 class couchbaseDriver(object):
@@ -50,65 +47,71 @@ class couchbaseDriver(object):
             self.cbcon = "couchbase://"
             self.opts = "?config_total_timeout=15&config_node_timeout=10&network=" + net_string
 
-    def connect(self, bucket_name, scope_name, collection_name):
+    def connect(self, bucket_name, scope_name, *collections):
+        bucket_dict = {}
+        scope_dict = {}
+        collection_dict = {}
         try:
             cluster_object = Cluster(self.cb_string,
                                    authenticator=self.auth,
                                    lockmode=LOCKMODE_NONE,
                                    timeout_options=self.timeouts)
             bucket_object = cluster_object.bucket(bucket_name)
+            bucket_dict[bucket_name] = bucket_object
             scope_object = bucket_object.scope(scope_name)
-            collection_object = scope_object.collection(collection_name)
+            scope_dict[scope_name] = scope_object
+            for collection_name in collections:
+                collection_object = scope_object.collection(collection_name)
+                collection_dict[collection_name] = collection_object
             self.dbObject = dbConnection(cluster_object,
-                                         bucket_object,
-                                         scope_object,
-                                         collection_object,
-                                         bucket_name,
-                                         scope_name,
-                                         collection_name)
+                                         bucket_dict,
+                                         scope_dict,
+                                         collection_dict)
             return True
         except Exception as e:
-            print("Can not connect to host {} bucket {} collection {}: {}".format(
+            print("Can not connect to host {} bucket {} collections {}: {}".format(
                 self.hostname,
                 bucket_name,
-                collection_name,
+                ",".join(collections),
                 e))
             raise
 
-    def get(self, key):
+    def get(self, collection, key):
         if self.dbObject:
             try:
-                key_name = self.formatKey(key)
-                result = self.dbObject.collection_object.get(key_name)
+                key_name = self.formatKey(collection, key)
+                result = self.dbObject.collections[collection].get(key_name)
                 return result.content_as[dict]
             except DocumentNotFoundException:
                 return None
             except Exception as e:
                 print("Can not get key {} from collection {}: {}".format(
                     key,
-                    self.dbObject.collection_name,
+                    collection,
                     e))
                 raise
 
-    def query(self, field, key, value):
+    def query(self, collection, field, key, value):
+        bucket_name = list(self.dbObject.bucket.keys())[0]
+        scope_name = list(self.dbObject.scope.keys())[0]
         if self.dbObject:
             contents = []
-            keyspace = self.dbObject.bucket_name + '.' + self.dbObject.scope_name + '.' + self.dbObject.collection_name
+            keyspace = bucket_name + '.' + scope_name + '.' + collection
             query = "SELECT " + field + " FROM " + keyspace + " WHERE " + key + " = \"" + value + "\";"
             try:
-                result = self.dbObject.cluster_object.query(query, QueryOptions(metrics=False, adhoc=False))
+                result = self.dbObject.cluster.query(query, QueryOptions(metrics=False, adhoc=False))
                 for item in result:
                     contents.append(item)
                 return contents
             except Exception as e:
                 print("Can not get key {} from collection {}: {}".format(
                     key,
-                    self.dbObject.collection_name,
+                    collection,
                     e))
                 raise
 
-    def formatKey(self, key):
-        return self.dbObject.collection_name + ':' + key
+    def formatKey(self, collection, key):
+        return collection + ':' + key
 
     @property
     def cb_string(self):
@@ -116,6 +119,8 @@ class couchbaseDriver(object):
 
 
 class restServer(BaseHTTPRequestHandler):
+    RESPONSE_JSON = 0
+    RESPONSE_IMAGE = 1
 
     def __init__(self, db, *args, **kwargs):
         self.db = db
@@ -133,18 +138,18 @@ class restServer(BaseHTTPRequestHandler):
     def server_error(self):
         self.send_response(500)
 
-    def v1_get_records(self, key, value):
+    def v1_get_records(self, collection, key, value):
         records = []
-        result = self.db.query('record_id', key, value)
+        result = self.db.query(collection, 'record_id', key, value)
         if len(result) > 0:
             for item in result:
-                record_data = self.db.get(item['record_id'])
+                record_data = self.db.get('user_data', item['record_id'])
                 records.append(record_data)
         return records
 
-    def v1_get_by_id(self, id):
+    def v1_get_by_id(self, collection, id):
         records = []
-        result = self.db.get(id)
+        result = self.db.get(collection, id)
         if result:
             records.append(result)
         return records
@@ -159,11 +164,18 @@ class restServer(BaseHTTPRequestHandler):
             self.not_found()
 
     def do_GET(self):
+        request_qualifier = None
+        response_type = restServer.RESPONSE_JSON
+        records = []
         try:
-            request_root = self.path.split('/')[1]
-            request_version = self.path.split('/')[2]
-            request_method = self.path.split('/')[3]
-            request_parameter = self.path.split('/')[4]
+            get_elements = self.path.split('/')
+            request_root = get_elements[1]
+            request_version = get_elements[2]
+            request_method = get_elements[3]
+            request_parameter = get_elements[4]
+            if len(get_elements) > 5:
+                request_qualifier = request_parameter
+                request_parameter = get_elements[5]
         except IndexError:
             self.bad_request()
             return
@@ -174,11 +186,16 @@ class restServer(BaseHTTPRequestHandler):
 
         try:
             if request_method == 'nickname':
-                records = self.v1_get_records('nickname', request_parameter)
+                records = self.v1_get_records('user_data', 'nickname', request_parameter)
             elif request_method == 'username':
-                records = self.v1_get_records('user_id', request_parameter)
+                records = self.v1_get_records('user_data', 'user_id', request_parameter)
             elif request_method == 'id':
-                records = self.v1_get_by_id(request_parameter)
+                records = self.v1_get_by_id('user_data', request_parameter)
+            elif request_method == 'picture':
+                if not request_qualifier:
+                    self.bad_request()
+                if request_qualifier == 'record':
+                    records = self.v1_get_by_id('user_images', request_parameter)
             else:
                 self.forbidden()
                 return
@@ -224,7 +241,7 @@ def main():
     args = parse_args()
 
     couchbase_server = couchbaseDriver(args.cluster, args.user, args.password, ssl=args.tls)
-    result = couchbase_server.connect(args.bucket, 'profiles', 'user_data')
+    result = couchbase_server.connect(args.bucket, 'profiles', 'user_data', 'user_images')
 
     if not result:
         print("Can not connect to database.")
