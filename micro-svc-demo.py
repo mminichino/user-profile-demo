@@ -10,6 +10,7 @@ import argparse
 import daemon
 import signal
 import json
+import base64
 from functools import partial
 from couchbase_core._libcouchbase import LOCKMODE_NONE
 from couchbase.cluster import Cluster, QueryOptions, ClusterTimeoutOptions
@@ -119,8 +120,8 @@ class couchbaseDriver(object):
 
 
 class restServer(BaseHTTPRequestHandler):
-    RESPONSE_JSON = 0
-    RESPONSE_IMAGE = 1
+    TYPE_JSON = 0
+    TYPE_IMAGE = 1
 
     def __init__(self, db, *args, **kwargs):
         self.db = db
@@ -138,6 +139,16 @@ class restServer(BaseHTTPRequestHandler):
     def server_error(self):
         self.send_response(500)
 
+    def get_image_data(self, records):
+        codec = None
+        image = None
+        try:
+            codec = records[0]['type']
+            image = records[0]['image']
+        except (KeyError, IndexError, TypeError):
+            pass
+        return image, codec
+
     def v1_get_records(self, collection, key, value):
         records = []
         result = self.db.query(collection, 'record_id', key, value)
@@ -154,19 +165,39 @@ class restServer(BaseHTTPRequestHandler):
             records.append(result)
         return records
 
-    def v1_responder(self, records):
+    def v1_responder(self, records, response_type):
+        content_length = None
         if len(records) > 0:
+            if response_type == restServer.TYPE_JSON:
+                content_type = "application/json"
+                response_body = bytes(json.dumps(records), "utf-8")
+            else:
+                image, codec = self.get_image_data(records)
+                if not image or not codec:
+                    self.bad_request()
+                    return
+                content_type = "image/{}".format(codec)
+                response_body = base64.b64decode(bytes(image, "utf-8"))
+                content_length = len(response_body)
             self.send_response(200)
-            self.send_header("Content-type", "application/json")
+            self.send_header("Content-type", content_type)
+            if content_length:
+                self.send_header("Content-Length", str(content_length))
             self.end_headers()
-            self.wfile.write(bytes(json.dumps(records), "utf-8"))
+            self.wfile.write(response_body)
         else:
             self.not_found()
 
+    def v1_responder_image(self, image, codec):
+        type_string = "image/{}".format(codec)
+        self.send_response(200)
+        self.send_header("Content-type", type_string)
+        self.end_headers()
+        self.wfile.write(image)
+
     def do_GET(self):
         request_qualifier = None
-        response_type = restServer.RESPONSE_JSON
-        records = []
+        response_type = restServer.TYPE_JSON
         try:
             get_elements = self.path.split('/')
             request_root = get_elements[1]
@@ -195,11 +226,17 @@ class restServer(BaseHTTPRequestHandler):
                 if not request_qualifier:
                     self.bad_request()
                 if request_qualifier == 'record':
-                    records = self.v1_get_by_id('user_images', request_parameter)
+                    pass
+                elif request_qualifier == 'raw':
+                    response_type = restServer.TYPE_IMAGE
+                else:
+                    self.forbidden()
+                    return
+                records = self.v1_get_by_id('user_images', request_parameter)
             else:
                 self.forbidden()
                 return
-            self.v1_responder(records)
+            self.v1_responder(records, response_type)
         except Exception as e:
             print("Server error: {}".format(e))
             self.server_error()
