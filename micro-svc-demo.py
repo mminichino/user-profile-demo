@@ -16,6 +16,7 @@ from couchbase_core._libcouchbase import LOCKMODE_NONE
 from couchbase.cluster import Cluster, QueryOptions, ClusterTimeoutOptions
 from couchbase.auth import PasswordAuthenticator
 from couchbase.exceptions import DocumentNotFoundException
+import couchbase.subdocument as SD
 from datetime import timedelta
 
 PORT_NUMBER = 8080
@@ -92,6 +93,21 @@ class couchbaseDriver(object):
                     e))
                 raise
 
+    def get_value(self, collection, key, field):
+        if self.dbObject:
+            try:
+                key_name = self.formatKey(collection, key)
+                result = self.dbObject.collections[collection].lookup_in(key_name, [SD.get(field)])
+                return result.content_as[str](0)
+            except DocumentNotFoundException:
+                return None
+            except Exception as e:
+                print("Can not get key {} from collection {}: {}".format(
+                    key,
+                    collection,
+                    e))
+                raise
+
     def query(self, collection, field, key, value):
         bucket_name = list(self.dbObject.bucket.keys())[0]
         scope_name = list(self.dbObject.scope.keys())[0]
@@ -123,12 +139,16 @@ class restServer(BaseHTTPRequestHandler):
     TYPE_JSON = 0
     TYPE_IMAGE = 1
 
-    def __init__(self, db, *args, **kwargs):
+    def __init__(self, db, token, *args, **kwargs):
         self.db = db
+        self.auth_token = token
         super().__init__(*args, **kwargs)
 
     def bad_request(self):
         self.send_response(400)
+
+    def unauthorized(self):
+        self.send_response(401)
 
     def not_found(self):
         self.send_response(404)
@@ -150,17 +170,12 @@ class restServer(BaseHTTPRequestHandler):
         return image, codec
 
     def v1_get_records(self, collection, key, value):
-        records = []
-        result = self.db.query(collection, 'record_id', key, value)
-        if len(result) > 0:
-            for item in result:
-                record_data = self.db.get('user_data', item['record_id'])
-                records.append(record_data)
-        return records
+        result = self.db.query(collection, '*', key, value)
+        return result
 
-    def v1_get_by_id(self, collection, id):
+    def v1_get_by_id(self, collection, key):
         records = []
-        result = self.db.get(collection, id)
+        result = self.db.get(collection, key)
         if result:
             records.append(result)
         return records
@@ -195,9 +210,23 @@ class restServer(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(image)
 
+    def v1_check_auth_token(self, headers):
+        for key in headers:
+            if key == 'authorization' or key == 'x-access-token':
+                token = headers[key]
+                if token.startswith('Bearer '):
+                    token = token[len('Bearer '):]
+                if token == self.auth_token:
+                    return True
+        return False
+
     def do_GET(self):
         request_qualifier = None
         response_type = restServer.TYPE_JSON
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        if not self.v1_check_auth_token(headers):
+            self.unauthorized()
+            return
         try:
             get_elements = self.path.split('/')
             request_root = get_elements[1]
@@ -245,10 +274,10 @@ class restServer(BaseHTTPRequestHandler):
 
 class microService(object):
 
-    def __init__(self, host, port, db):
+    def __init__(self, host, port, db, token):
         self.hostname = host
         self.port = port
-        restHandler = partial(restServer, db)
+        restHandler = partial(restServer, db, token)
         self.server = HTTPServer((self.hostname, self.port), restHandler)
 
     def start(self):
@@ -274,17 +303,27 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+def get_auth_token(db):
+    key_id = '1'
+    response = db.get_value('service_auth', key_id, 'token')
+    if (len(response)) > 0:
+        return response
+    else:
+        raise Exception("Can not fetch auth token")
+
 def main():
     args = parse_args()
 
     couchbase_server = couchbaseDriver(args.cluster, args.user, args.password, ssl=args.tls)
-    result = couchbase_server.connect(args.bucket, 'profiles', 'user_data', 'user_images')
+    result = couchbase_server.connect(args.bucket, 'profiles', 'user_data', 'user_images', 'service_auth')
 
     if not result:
         print("Can not connect to database.")
         sys.exit(1)
 
-    server = microService(args.host, args.port, couchbase_server)
+    auth_token = get_auth_token(couchbase_server)
+
+    server = microService(args.host, args.port, couchbase_server, auth_token)
     logfile = open(args.log, 'w')
 
     def signalHandler(signum, frame):
