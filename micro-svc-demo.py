@@ -1,9 +1,10 @@
-#!/usr/bin/env -S python3 -W ignore
+#!/usr/bin/env -S python3 -W ignore -u
 
 '''
 Python Microservice
 '''
 
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import argparse
@@ -11,6 +12,7 @@ import daemon
 import signal
 import json
 import base64
+from distutils.util import strtobool
 from functools import partial
 from couchbase_core._libcouchbase import LOCKMODE_NONE
 from couchbase.cluster import Cluster, QueryOptions, ClusterTimeoutOptions
@@ -33,15 +35,15 @@ class dbConnection(object):
 
 class couchbaseDriver(object):
 
-    def __init__(self, hostname, username, password, ssl=False, internal=False):
+    def __init__(self, hostname, username, password, ssl=False, external=False):
         self.hostname = hostname
         self.auth = PasswordAuthenticator(username, password)
         self.timeouts = ClusterTimeoutOptions(query_timeout=timedelta(seconds=30),
                                               kv_timeout=timedelta(seconds=30))
-        if internal:
-            net_string = 'default'
-        else:
+        if external:
             net_string = 'external'
+        else:
+            net_string = 'default'
         if ssl:
             self.cbcon = "couchbases://"
             self.opts = "?ssl=no_verify&config_total_timeout=15&config_node_timeout=10&network=" + net_string
@@ -288,16 +290,23 @@ class microService(object):
 
 
 def parse_args():
+    host_default = os.environ['COUCHBASE_HOST'] if os.environ.get('COUCHBASE_HOST') else "localhost"
+    user_default = os.environ['COUCHBASE_USER'] if os.environ.get('COUCHBASE_USER') else "Administrator"
+    pass_default = os.environ['COUCHBASE_PASSWORD'] if os.environ.get('COUCHBASE_PASSWORD') else "password"
+    bucket_default = os.environ['COUCHBASE_BUCKET'] if os.environ.get('COUCHBASE_BUCKET') else "sample_app"
+    net_default = os.environ['COUCHBASE_NETWORK'] if os.environ.get('COUCHBASE_NETWORK') else "False"
+    ssl_default = os.environ['COUCHBASE_TLS'] if os.environ.get('COUCHBASE_TLS') else "True"
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('-d', '--daemon', action='store_true')
     parser.add_argument('-h', '--host', action='store', default='')
     parser.add_argument('-p', '--port', action='store', default=PORT_NUMBER)
     parser.add_argument('-l', '--log', action='store', default=LOG_FILE)
-    parser.add_argument('-c', '--cluster', action='store', required=True)
-    parser.add_argument('-b', '--bucket', action='store', required=True)
-    parser.add_argument('-u', '--user', action='store', required=True)
-    parser.add_argument('-P', '--password', action='store', required=True)
-    parser.add_argument('--tls', action='store_true')
+    parser.add_argument('-c', '--cluster', action='store', default=host_default)
+    parser.add_argument('-b', '--bucket', action='store', default=bucket_default)
+    parser.add_argument('-u', '--user', action='store', default=user_default)
+    parser.add_argument('-P', '--password', action='store', default=pass_default)
+    parser.add_argument('-e', '--external', action='store', default=net_default)
+    parser.add_argument('-S', '--tls', action='store', default=ssl_default)
     parser.add_argument('--debug', action='store', default=3)
     parser.add_argument('-?', action='help')
     args = parser.parse_args()
@@ -313,8 +322,13 @@ def get_auth_token(db):
 
 def main():
     args = parse_args()
+    net_arg = bool(strtobool(args.external))
+    tls_arg = bool(strtobool(args.tls))
 
-    couchbase_server = couchbaseDriver(args.cluster, args.user, args.password, ssl=args.tls)
+    print("Starting Service: [Cluster] {} [User] {} [Bucket] {} SSL: {}".format(
+        args.cluster, args.user, args.bucket, tls_arg))
+
+    couchbase_server = couchbaseDriver(args.cluster, args.user, args.password, ssl=tls_arg, external=net_arg)
     result = couchbase_server.connect(args.bucket, 'profiles', 'user_data', 'user_images', 'service_auth')
 
     if not result:
