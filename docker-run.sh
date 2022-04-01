@@ -16,7 +16,7 @@ err_exit () {
    exit 1
 }
 
-while getopts "n:u:p:b:k" opt
+while getopts "n:u:p:b:c:k" opt
 do
   case $opt in
     n)
@@ -33,6 +33,9 @@ do
       ;;
     k)
       STOP_CONTAINER=1
+      ;;
+    c)
+      CONTAINER_NAME=$OPTARG
       ;;
     \?)
       err_exit "Invalid Argument"
