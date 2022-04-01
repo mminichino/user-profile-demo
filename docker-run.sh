@@ -35,7 +35,7 @@ do
       STOP_CONTAINER=1
       ;;
     c)
-      CONTAINER_NAME=$OPTARG
+      IMAGE_NAME=$OPTARG
       ;;
     \?)
       err_exit "Invalid Argument"
