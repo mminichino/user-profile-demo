@@ -138,8 +138,6 @@ class couchbaseDriver(object):
 
 
 class restServer(BaseHTTPRequestHandler):
-    TYPE_JSON = 0
-    TYPE_IMAGE = 1
 
     def __init__(self, db, token, *args, **kwargs):
         self.db = db
@@ -147,16 +145,60 @@ class restServer(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def bad_request(self):
+        content_type = "application/json"
+        response_json = {
+            'status': "failure",
+            'message': {
+                'error': "Bad Request"
+            }
+        }
+        response_body = bytes(json.dumps(response_json), "utf-8")
         self.send_response(400)
+        self.send_header("Content-type", content_type)
+        self.end_headers()
+        self.wfile.write(response_body)
 
     def unauthorized(self):
+        content_type = "application/json"
+        response_json = {
+            'status': "failure",
+            'message': {
+                'error': "Unauthorized"
+            }
+        }
+        response_body = bytes(json.dumps(response_json), "utf-8")
         self.send_response(401)
+        self.send_header("Content-type", content_type)
+        self.end_headers()
+        self.wfile.write(response_body)
 
     def not_found(self):
+        content_type = "application/json"
+        response_json = {
+            'status': "failure",
+            'message': {
+                'error': "Not Found"
+            }
+        }
+        response_body = bytes(json.dumps(response_json), "utf-8")
         self.send_response(404)
+        self.send_header("Content-type", content_type)
+        self.end_headers()
+        self.wfile.write(response_body)
 
     def forbidden(self):
+        content_type = "application/json"
+        response_json = {
+            'status': "failure",
+            'message': {
+                'error': "Forbidden"
+            }
+        }
+        response_body = bytes(json.dumps(response_json), "utf-8")
         self.send_response(403)
+        self.send_header("Content-type", content_type)
+        self.end_headers()
+        self.wfile.write(response_body)
 
     def server_error(self):
         self.send_response(500)
@@ -182,39 +224,37 @@ class restServer(BaseHTTPRequestHandler):
             records.append(result)
         return records
 
-    def v1_responder(self, records, response_type):
-        content_length = None
+    def v1_responder(self, records):
         if len(records) > 0:
-            if response_type == restServer.TYPE_JSON:
-                content_type = "application/json"
-                response_body = bytes(json.dumps(records), "utf-8")
-            else:
-                image, codec = self.get_image_data(records)
-                if not image or not codec:
-                    self.bad_request()
-                    return
-                content_type = "image/{}".format(codec)
-                response_body = base64.b64decode(bytes(image, "utf-8"))
-                content_length = len(response_body)
+            content_type = "application/json"
+            response_body = bytes(json.dumps(records), "utf-8")
             self.send_response(200)
             self.send_header("Content-type", content_type)
-            if content_length:
-                self.send_header("Content-Length", str(content_length))
             self.end_headers()
             self.wfile.write(response_body)
         else:
             self.not_found()
 
-    def v1_responder_image(self, image, codec):
-        type_string = "image/{}".format(codec)
-        self.send_response(200)
-        self.send_header("Content-type", type_string)
-        self.end_headers()
-        self.wfile.write(image)
+    def v1_responder_image(self, records):
+        if len(records) > 0:
+            image, codec = self.get_image_data(records)
+            if not image or not codec:
+                self.bad_request()
+                return
+            content_type = "image/{}".format(codec)
+            response_body = base64.b64decode(bytes(image, "utf-8"))
+            content_length = len(response_body)
+            self.send_response(200)
+            self.send_header("Content-type", content_type)
+            self.send_header("Content-Length", str(content_length))
+            self.end_headers()
+            self.wfile.write(response_body)
+        else:
+            self.not_found()
 
     def v1_check_auth_token(self, headers):
         for key in headers:
-            if key == 'authorization' or key == 'x-access-token':
+            if key == 'Authorization' or key == 'x-access-token':
                 token = headers[key]
                 if token.startswith('Bearer '):
                     token = token[len('Bearer '):]
@@ -223,55 +263,63 @@ class restServer(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        request_qualifier = None
-        response_type = restServer.TYPE_JSON
-        headers = {k.lower(): v for k, v in self.headers.items()}
-        if not self.v1_check_auth_token(headers):
-            self.unauthorized()
-            return
-        try:
-            get_elements = self.path.split('/')
-            request_root = get_elements[1]
-            request_version = get_elements[2]
-            request_method = get_elements[3]
-            request_parameter = get_elements[4]
-            if len(get_elements) > 5:
-                request_qualifier = request_parameter
-                request_parameter = get_elements[5]
-        except IndexError:
-            self.bad_request()
-            return
-
-        if request_root != 'api' or request_version != 'v1':
-            self.forbidden()
-            return
-
-        try:
-            if request_method == 'nickname':
-                records = self.v1_get_records('user_data', 'nickname', request_parameter)
-            elif request_method == 'username':
-                records = self.v1_get_records('user_data', 'user_id', request_parameter)
-            elif request_method == 'id':
-                records = self.v1_get_by_id('user_data', request_parameter)
-            elif request_method == 'picture':
-                if not request_qualifier:
-                    self.bad_request()
-                if request_qualifier == 'record':
-                    pass
-                elif request_qualifier == 'raw':
-                    response_type = restServer.TYPE_IMAGE
-                else:
-                    self.forbidden()
-                    return
-                records = self.v1_get_by_id('user_images', request_parameter)
-            else:
-                self.forbidden()
+        if self.path.startswith('/api/v1/id/'):
+            if not self.v1_check_auth_token(self.headers):
+                self.unauthorized()
                 return
-            self.v1_responder(records, response_type)
-        except Exception as e:
-            print("Server error: {}".format(e))
-            self.server_error()
-            return
+            request_parameter = self.path.split('/')[-1]
+            if len(request_parameter) == 0:
+                self.bad_request()
+                return
+            records = self.v1_get_by_id('user_data', request_parameter)
+            self.v1_responder(records)
+        elif self.path.startswith('/api/v1/nickname/'):
+            if not self.v1_check_auth_token(self.headers):
+                self.unauthorized()
+                return
+            request_parameter = self.path.split('/')[-1]
+            if len(request_parameter) == 0:
+                self.bad_request()
+                return
+            records = self.v1_get_records('user_data', 'nickname', request_parameter)
+            self.v1_responder(records)
+        elif self.path.startswith('/api/v1/username/'):
+            if not self.v1_check_auth_token(self.headers):
+                self.unauthorized()
+                return
+            request_parameter = self.path.split('/')[-1]
+            if len(request_parameter) == 0:
+                self.bad_request()
+                return
+            records = self.v1_get_records('user_data', 'user_id', request_parameter)
+            self.v1_responder(records)
+        elif self.path.startswith('/api/v1/picture/record/'):
+            if not self.v1_check_auth_token(self.headers):
+                self.unauthorized()
+                return
+            request_parameter = self.path.split('/')[-1]
+            if len(request_parameter) == 0:
+                self.bad_request()
+                return
+            records = self.v1_get_by_id('user_images', request_parameter)
+            self.v1_responder(records)
+        elif self.path.startswith('/api/v1/picture/raw/'):
+            if not self.v1_check_auth_token(self.headers):
+                self.unauthorized()
+                return
+            request_parameter = self.path.split('/')[-1]
+            if len(request_parameter) == 0:
+                self.bad_request()
+                return
+            records = self.v1_get_by_id('user_images', request_parameter)
+            self.v1_responder_image(records)
+        elif self.path.startswith('/healthz'):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'<html>READY</html>')
+        else:
+            self.forbidden()
 
 
 class microService(object):
