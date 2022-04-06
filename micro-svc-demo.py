@@ -263,57 +263,44 @@ class restServer(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        if self.path.startswith('/api/v1/id/'):
+        path_vector = self.path.split('/')
+        path_vector_length = len(path_vector)
+        if path_vector_length == 5 and path_vector[3] == 'id':
             if not self.v1_check_auth_token(self.headers):
                 self.unauthorized()
                 return
-            request_parameter = self.path.split('/')[-1]
-            if len(request_parameter) == 0:
-                self.bad_request()
-                return
+            request_parameter = path_vector[4]
             records = self.v1_get_by_id('user_data', request_parameter)
             self.v1_responder(records)
-        elif self.path.startswith('/api/v1/nickname/'):
+        elif path_vector_length == 5 and path_vector[3] == 'nickname':
             if not self.v1_check_auth_token(self.headers):
                 self.unauthorized()
                 return
-            request_parameter = self.path.split('/')[-1]
-            if len(request_parameter) == 0:
-                self.bad_request()
-                return
+            request_parameter = path_vector[4]
             records = self.v1_get_records('user_data', 'nickname', request_parameter)
             self.v1_responder(records)
-        elif self.path.startswith('/api/v1/username/'):
+        elif path_vector_length == 5 and path_vector[3] == 'username':
             if not self.v1_check_auth_token(self.headers):
                 self.unauthorized()
                 return
-            request_parameter = self.path.split('/')[-1]
-            if len(request_parameter) == 0:
-                self.bad_request()
-                return
+            request_parameter = path_vector[4]
             records = self.v1_get_records('user_data', 'user_id', request_parameter)
             self.v1_responder(records)
-        elif self.path.startswith('/api/v1/picture/record/'):
+        elif path_vector_length == 6 and path_vector[3] == 'picture' and path_vector[4] == 'record':
             if not self.v1_check_auth_token(self.headers):
                 self.unauthorized()
                 return
-            request_parameter = self.path.split('/')[-1]
-            if len(request_parameter) == 0:
-                self.bad_request()
-                return
+            request_parameter = path_vector[5]
             records = self.v1_get_by_id('user_images', request_parameter)
             self.v1_responder(records)
-        elif self.path.startswith('/api/v1/picture/raw/'):
+        elif path_vector_length == 6 and path_vector[3] == 'picture' and path_vector[4] == 'raw':
             if not self.v1_check_auth_token(self.headers):
                 self.unauthorized()
                 return
-            request_parameter = self.path.split('/')[-1]
-            if len(request_parameter) == 0:
-                self.bad_request()
-                return
+            request_parameter = path_vector[5]
             records = self.v1_get_by_id('user_images', request_parameter)
             self.v1_responder_image(records)
-        elif self.path.startswith('/healthz'):
+        elif path_vector_length == 2 and path_vector[1] == 'healthz':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
